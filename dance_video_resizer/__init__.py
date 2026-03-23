@@ -1,0 +1,1 @@
+"""Dance video resizing package."""
