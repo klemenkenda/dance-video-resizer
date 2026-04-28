@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Iterator, Optional, Tuple
 
 try:
     import imageio_ffmpeg
 except Exception:  # noqa: BLE001
     imageio_ffmpeg = None
+
+
+FfmpegResolution = Tuple[Optional[str], Optional[str]]
 
 
 def _is_working_ffmpeg(executable: str) -> bool:
@@ -24,39 +29,121 @@ def _is_working_ffmpeg(executable: str) -> bool:
     return result.returncode == 0
 
 
-def is_ffmpeg_available(ffmpeg_path: str = "ffmpeg") -> bool:
-    return resolve_ffmpeg_path(ffmpeg_path) is not None
+def _iter_conda_roots() -> Iterator[Path]:
+    seen = set()
+
+    for raw_path in (os.getenv("CONDA_PREFIX"), sys.prefix):
+        if not raw_path:
+            continue
+
+        path = Path(raw_path)
+        normalized = str(path).lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        yield path
+
+    user_profile = os.getenv("USERPROFILE")
+    if not user_profile:
+        return
+
+    for suffix in ("miniconda3", "anaconda3"):
+        root = Path(user_profile) / suffix
+        normalized = str(root).lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        yield root
 
 
-def resolve_ffmpeg_path(ffmpeg_path: str = "ffmpeg") -> Optional[str]:
+def _iter_common_ffmpeg_candidates() -> Iterator[Tuple[str, str]]:
+    seen = set()
+
+    def emit(path: Path, source: str) -> Iterator[Tuple[str, str]]:
+        normalized = str(path).lower()
+        if normalized in seen:
+            return
+        seen.add(normalized)
+        yield (str(path), source)
+
+    for root in _iter_conda_roots():
+        for relative in (
+            Path("Library/bin/ffmpeg.exe"),
+            Path("Scripts/ffmpeg.exe"),
+            Path("bin/ffmpeg"),
+        ):
+            yield from emit(root / relative, f"conda:{root}")
+
+        envs_dir = root / "envs"
+        if envs_dir.is_dir():
+            for env_dir in envs_dir.iterdir():
+                if not env_dir.is_dir():
+                    continue
+                yield from emit(env_dir / "Library/bin/ffmpeg.exe", f"conda-env:{env_dir.name}")
+
+    program_files = [os.getenv("ProgramFiles"), os.getenv("ProgramFiles(x86)"), os.getenv("LocalAppData")]
+    for base in program_files:
+        if not base:
+            continue
+
+        base_path = Path(base)
+        for relative in (
+            Path("ffmpeg/bin/ffmpeg.exe"),
+            Path("FFmpeg/bin/ffmpeg.exe"),
+            Path("Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-*/bin/ffmpeg.exe"),
+            Path("Microsoft/WinGet/Links/ffmpeg.exe"),
+        ):
+            pattern = relative.as_posix()
+            if "*" in pattern:
+                for matched in sorted(base_path.glob(pattern)):
+                    yield from emit(matched, f"windows:{matched.parent}")
+            else:
+                yield from emit(base_path / relative, f"windows:{base_path}")
+
+
+def resolve_ffmpeg(ffmpeg_path: str = "ffmpeg") -> FfmpegResolution:
     candidates = []
 
     if ffmpeg_path:
-        candidates.append(ffmpeg_path)
+        candidates.append((ffmpeg_path, "configured"))
 
-    which = shutil.which(ffmpeg_path)
-    if which:
-        candidates.append(which)
+        which = shutil.which(ffmpeg_path)
+        if which:
+            candidates.append((which, "PATH"))
+
+    candidates.extend(_iter_common_ffmpeg_candidates())
 
     if imageio_ffmpeg is not None:
         try:
-            candidates.append(imageio_ffmpeg.get_ffmpeg_exe())
+            candidates.append((imageio_ffmpeg.get_ffmpeg_exe(), "imageio-ffmpeg"))
         except Exception:  # noqa: BLE001
             pass
 
     seen = set()
-    for candidate in candidates:
+    for candidate, source in candidates:
         if not candidate:
             continue
-        if candidate in seen:
+
+        normalized = str(candidate).lower()
+        if normalized in seen:
             continue
-        seen.add(candidate)
+        seen.add(normalized)
 
         if Path(candidate).exists() or shutil.which(candidate):
             if _is_working_ffmpeg(candidate):
-                return candidate
+                return candidate, source
 
-    return None
+    return None, None
+
+
+def is_ffmpeg_available(ffmpeg_path: str = "ffmpeg") -> bool:
+    resolved_ffmpeg, _ = resolve_ffmpeg(ffmpeg_path)
+    return resolved_ffmpeg is not None
+
+
+def resolve_ffmpeg_path(ffmpeg_path: str = "ffmpeg") -> Optional[str]:
+    resolved_ffmpeg, _ = resolve_ffmpeg(ffmpeg_path)
+    return resolved_ffmpeg
 
 
 def merge_audio(
