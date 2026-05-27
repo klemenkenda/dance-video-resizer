@@ -247,19 +247,45 @@ def process_detection_overlay_video(input_path: str, output_path: str, config: P
                 return None
             x1, y1, x2, y2 = crop_box
         else:
+            # Wider target (portrait-to-landscape): full source width, Y-axis crop only.
             crop_h = max(1.0, min(float(src_h), state.crop_height))
             half_h = crop_h / 2.0
             center_y = min(max(state.center_y, half_h), src_h - half_h)
             x1 = 0
             x2 = src_w
-            y1 = int(round(center_y - half_h))
-            y2 = int(round(center_y + half_h))
-            y1 = max(0, y1)
-            y2 = min(src_h, y2)
+            y1 = max(0, int(round(center_y - half_h)))
+            y2 = min(src_h, int(round(center_y + half_h)))
 
         if x2 <= x1 or y2 <= y1:
             return None
         return (x1, y1, x2 - 1, y2 - 1)
+
+    def _expand_crop_box_to_cover_subject(
+        crop_box: tuple[int, int, int, int] | None,
+        subject_box: tuple[int, int, int, int] | None,
+    ):
+        if crop_box is None or subject_box is None:
+            return crop_box
+
+        cx1, cy1, cx2, cy2 = crop_box
+        sx1, sy1, sx2, sy2 = subject_box
+        subject_w = max(1, sx2 - sx1 + 1)
+        subject_h = max(1, sy2 - sy1 + 1)
+        pad_x = max(8, int(round(subject_w * max(0.05, config.margin_ratio * 0.55))))
+        pad_y = max(12, int(round(subject_h * max(0.06, config.margin_ratio * 0.75))))
+
+        nx1 = min(cx1, sx1 - pad_x)
+        ny1 = min(cy1, sy1 - pad_y)
+        nx2 = max(cx2, sx2 + pad_x)
+        ny2 = max(cy2, sy2 + pad_y)
+
+        nx1 = max(0, nx1)
+        ny1 = max(0, ny1)
+        nx2 = min(src_w - 1, nx2)
+        ny2 = min(src_h - 1, ny2)
+        if nx2 <= nx1 or ny2 <= ny1:
+            return crop_box
+        return (nx1, ny1, nx2, ny2)
 
     def _select_central_boxes(person_boxes: list[tuple[int, int, int, int]]) -> list[tuple[int, int, int, int]]:
         if not person_boxes:
@@ -373,7 +399,7 @@ def process_detection_overlay_video(input_path: str, output_path: str, config: P
                 cv2.rectangle(boxed, (cx1, cy1), (cx2, cy2), (240, 120, 30), 2)
                 cv2.putText(
                     boxed,
-                    "portrait crop",
+                    "tracked crop",
                     (cx1, max(20, cy1 - 8)),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.65,
@@ -403,7 +429,7 @@ def process_detection_overlay_video(input_path: str, output_path: str, config: P
             )
             cv2.putText(
                 boxed,
-                "portrait frame: blue",
+                "tracked crop: orange",
                 (20, 100),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
@@ -450,7 +476,9 @@ def process_detection_overlay_video(input_path: str, output_path: str, config: P
             else:
                 target_state = current_state
             current_state = reframer.smooth_state(current_state, target_state)
+            current_state = reframer.ensure_subject_fits(current_state, subject_box)
             crop_box = _state_to_source_crop_box(current_state)
+            crop_box = _expand_crop_box_to_cover_subject(crop_box, subject_box)
 
             out_frame = _render_overlay(entries[center_idx][0], smoothed, entries[center_idx][3], crop_box)
             writer.write(out_frame)
@@ -492,7 +520,9 @@ def process_detection_overlay_video(input_path: str, output_path: str, config: P
         else:
             target_state = current_state
         current_state = reframer.smooth_state(current_state, target_state)
+        current_state = reframer.ensure_subject_fits(current_state, subject_box)
         crop_box = _state_to_source_crop_box(current_state)
+        crop_box = _expand_crop_box_to_cover_subject(crop_box, subject_box)
 
         out_frame = _render_overlay(remaining[i][0], smoothed, remaining[i][3], crop_box)
         writer.write(out_frame)
@@ -820,6 +850,7 @@ def process_video(input_path: str, output_path: str, config: ProcessingConfig) -
             else:
                 target_state = current_state
             current_state = reframer.smooth_state(current_state, target_state)
+            current_state = reframer.ensure_subject_fits(current_state, subject_box)
 
             out = reframer.render_frame(entries[center_idx][0], current_state)
             writer.write(out)
@@ -861,6 +892,7 @@ def process_video(input_path: str, output_path: str, config: ProcessingConfig) -
         else:
             target_state = current_state
         current_state = reframer.smooth_state(current_state, target_state)
+        current_state = reframer.ensure_subject_fits(current_state, subject_box)
 
         out = reframer.render_frame(remaining[i][0], current_state)
         writer.write(out)

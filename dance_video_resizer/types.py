@@ -18,3 +18,4 @@ class ReframeState:
     center_x: float
     center_y: float
     crop_height: float
+    crop_width: float
